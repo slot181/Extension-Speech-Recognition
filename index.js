@@ -783,7 +783,7 @@ $(document).ready(function () {
                             <small>Enable messages mapping</small>
                         </label>
                     </div>
-                    <form id="speech_recognition_provider_settings" class="inline-drawer-content">
+                    <form id="speech_recognition_provider_settings">
                     </form>
                 </div>
             </div>

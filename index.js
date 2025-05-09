@@ -46,6 +46,7 @@ let audioChunks = [];
 
 /** @type {MediaRecorder} */
 let mediaRecorder = null;
+let vadShouldBeActive = false; // For new VAD behavior
 
 async function moduleWorker() {
     if (sttProviderName != 'Streaming') {
@@ -215,27 +216,27 @@ function loadNavigatorAudioRecording() {
             const isFirefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
             const audioContext = new AudioContext(!isFirefox ? { sampleRate: 16000 } : null);
             const source = audioContext.createMediaStreamSource(stream);
-            const settings = {
+            const vadSettings = { // Renamed to avoid conflict if 'settings' is used elsewhere in scope
                 source: source,
                 voice_start: function () {
-                    if (!audioRecording && extension_settings.speech_recognition.voiceActivationEnabled) {
-                        console.debug(DEBUG_PREFIX + 'Voice started');
-                        if (micButton.is(':visible')) {
-                            micButton.trigger('click');
-                        }
+                    // Recording should only start on manual mic click.
+                    // This callback can be used for UI feedback if needed when voiceActivationEnabled.
+                    if (extension_settings.speech_recognition.voiceActivationEnabled && vadShouldBeActive) {
+                        console.debug(DEBUG_PREFIX + 'VAD detected voice start (manual start expected, VAD will not auto-start recording).');
                     }
                 },
                 voice_stop: function () {
-                    if (audioRecording && extension_settings.speech_recognition.voiceActivationEnabled) {
-                        console.debug(DEBUG_PREFIX + 'Voice stopped');
+                    // Only auto-stop if recording was manually started, voice activation is on, AND VAD is supposed to be active.
+                    if (audioRecording && extension_settings.speech_recognition.voiceActivationEnabled && vadShouldBeActive) {
+                        console.debug(DEBUG_PREFIX + 'VAD detected voice stop, stopping recording.');
                         if (micButton.is(':visible')) {
-                            micButton.trigger('click');
+                            micButton.trigger('click'); // Simulate click to stop recording
                         }
                     }
                 },
             };
 
-            new VAD(settings);
+            new VAD(vadSettings);
 
             mediaRecorder = new MediaRecorder(stream);
 
@@ -245,18 +246,24 @@ function loadNavigatorAudioRecording() {
                     console.debug(DEBUG_PREFIX + mediaRecorder.state);
                     console.debug(DEBUG_PREFIX + 'recorder started');
                     audioRecording = true;
+                    vadShouldBeActive = true; // VAD is now allowed to influence stopping
                     activateMicIcon(micButton);
                 }
-                else {
-                    mediaRecorder.stop();
+                else { // Stopping recording
+                    mediaRecorder.stop(); // This will trigger onstop
                     console.debug(DEBUG_PREFIX + mediaRecorder.state);
                     console.debug(DEBUG_PREFIX + 'recorder stopped');
                     audioRecording = false;
+                    vadShouldBeActive = false; // VAD should not influence stopping anymore
                     deactivateMicIcon(micButton);
                 }
             });
 
             mediaRecorder.onstop = async function () {
+                // Ensure vadShouldBeActive is false now that recording has definitively stopped,
+                // especially if stopped by VAD's voice_stop.
+                vadShouldBeActive = false;
+
                 console.debug(DEBUG_PREFIX + 'data available after MediaRecorder.stop() called: ', audioChunks.length, ' chunks');
                 const audioBlob = new Blob(audioChunks, { type: 'audio/webm;codecs=opus' });
                 const arrayBuffer = await audioBlob.arrayBuffer();
@@ -269,9 +276,24 @@ function loadNavigatorAudioRecording() {
                 const wavBlob = await convertAudioBufferToWavBlob(audioBuffer);
                 const transcript = await sttProvider.processAudio(wavBlob);
 
-                // TODO: lock and release recording while processing?
                 console.debug(DEBUG_PREFIX + 'received transcript:', transcript);
-                processTranscript(transcript);
+
+                if (transcript && transcript.trim().length > 0) {
+                    if (extension_settings.speech_recognition.autoSendAfterTranscription) {
+                        console.debug(DEBUG_PREFIX + 'Auto-sending transcript.');
+                        await sendMessageAsUser(transcript.trim());
+                        // Check if context generation is needed, similar to 'auto_send' in processTranscript
+                        // This depends on whether user expects a response from the character.
+                        // For now, let's assume it's similar to existing auto_send.
+                        if (getContext().generate) { // Check if generate function exists
+                           await getContext().generate();
+                        }
+                    } else {
+                        processTranscript(transcript);
+                    }
+                } else {
+                    console.debug(DEBUG_PREFIX + 'Empty transcript received, not processing.');
+                }
             };
 
             mediaRecorder.ondataavailable = function (e) {
@@ -424,6 +446,7 @@ const defaultSettings = {
     messageMapping: [],
     messageMappingEnabled: false,
     voiceActivationEnabled: false,
+    autoSendAfterTranscription: false, // New default setting
     /**
      * @type {KeyCombo} Push-to-talk key combo
      */
@@ -431,6 +454,10 @@ const defaultSettings = {
 };
 
 function loadSettings() {
+    // Ensure extension_settings.speech_recognition exists
+    if (extension_settings.speech_recognition === undefined) {
+        extension_settings.speech_recognition = {};
+    }
     if (Object.keys(extension_settings.speech_recognition).length === 0) {
         Object.assign(extension_settings.speech_recognition, defaultSettings);
     }
@@ -449,6 +476,7 @@ function loadSettings() {
     $('#speech_recognition_message_mapping_enabled').prop('checked', extension_settings.speech_recognition.messageMappingEnabled);
     $('#speech_recognition_ptt').val(extension_settings.speech_recognition.ptt ? formatPushToTalkKey(extension_settings.speech_recognition.ptt) : '');
     $('#speech_recognition_voice_activation_enabled').prop('checked', extension_settings.speech_recognition.voiceActivationEnabled);
+    $('#speech_recognition_auto_send_after_transcription').prop('checked', extension_settings.speech_recognition.autoSendAfterTranscription);
 }
 
 async function onMessageModeChange() {
@@ -493,6 +521,11 @@ async function onMessageMappingEnabledClick() {
 
 function onVoiceActivationEnabledChange() {
     extension_settings.speech_recognition.voiceActivationEnabled = !!$('#speech_recognition_voice_activation_enabled').prop('checked');
+    saveSettingsDebounced();
+}
+
+function onAutoSendAfterTranscriptionChange() {
+    extension_settings.speech_recognition.autoSendAfterTranscription = !!$('#speech_recognition_auto_send_after_transcription').prop('checked');
     saveSettingsDebounced();
 }
 
@@ -767,11 +800,17 @@ $(document).ready(function () {
                     <div id="speech_recognition_voice_activation_enabled_div" title="Automatically start and stop recording when you start and stop speaking.">
                         <label class="checkbox_label" for="speech_recognition_voice_activation_enabled">
                             <input type="checkbox" id="speech_recognition_voice_activation_enabled" name="speech_recognition_voice_activation_enabled">
-                            <small>Enable activation by voice</small>
+                            <small>Enable activation by voice (VAD auto-stops recording)</small>
+                        </label>
+                    </div>
+                    <div id="speech_recognition_auto_send_after_transcription_div" title="Automatically send the message after transcription is complete (e.g., when VAD stops recording or PTT is released).">
+                        <label class="checkbox_label" for="speech_recognition_auto_send_after_transcription">
+                            <input type="checkbox" id="speech_recognition_auto_send_after_transcription">
+                            <small>Auto-send after transcription</small>
                         </label>
                     </div>
                     <div id="speech_recognition_message_mode_div">
-                        <span>Message Mode</span> </br>
+                        <span>Message Mode (if not auto-sent by above)</span> </br>
                         <select id="speech_recognition_message_mode">
                             <option value="append">Append</option>
                             <option value="replace">Replace</option>
@@ -806,6 +845,7 @@ $(document).ready(function () {
         $('#speech_recognition_language').on('change', onSttLanguageChange);
         $('#speech_recognition_message_mapping_enabled').on('click', onMessageMappingEnabledClick);
         $('#speech_recognition_voice_activation_enabled').on('change', onVoiceActivationEnabledChange);
+        $('#speech_recognition_auto_send_after_transcription').on('change', onAutoSendAfterTranscriptionChange);
         $('#speech_recognition_ptt').on('focus', function () {
             if (this instanceof HTMLInputElement) {
                 this.value = 'Enter a key combo. "Escape" to clear';

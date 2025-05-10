@@ -22,8 +22,8 @@ class GeminiSttProvider {
     defaultSettings = {
         apiKey: '',
         baseUrl: 'https://generativelanguage.googleapis.com',
-        modelName: 'gemini-2.0-flash', // Default model as per user's request
-        prompt: 'This is a speech recognition service. Transcribe the user\'s audio verbatim, without adding or omitting any words. Do not generate any additional content beyond the transcription.',
+        modelName: 'gemini-2.5-flash-preview-04-17', // Default model as per user's request
+        prompt: 'You are a speech recognition assistant. Transcribe verbatim any audio files the user sends you, without adding or omitting any words. Apart from the transcription itself, do not generate any other content. When outputting Chinese, use Simplified Chinese by default.',
     };
 
     get settingsHtml() {
